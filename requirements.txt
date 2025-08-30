@@ -3,7 +3,7 @@ pymupdf
 sentence-transformers
 faiss-cpu
 ibm-watsonx-ai
-google-genai
+ibm-granite 1b\2b
 transformers
 torch
 numpy
@@ -11,3 +11,5 @@ pandas
 Pillow
 requests
 python-dotenv
+tesseract
+easyocr
