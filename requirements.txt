@@ -1,0 +1,13 @@
+streamlit
+pymupdf
+sentence-transformers
+faiss-cpu
+ibm-watsonx-ai
+google-genai
+transformers
+torch
+numpy
+pandas
+Pillow
+requests
+python-dotenv

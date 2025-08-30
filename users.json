@@ -1,0 +1,10 @@
+{
+    "user": {
+        "password_hash": "e606e38b0d8c19b24cf0ee3808183162ea7cd63ff7912dbb22b5e803286b4446",
+        "name": "Demo User",
+        "role": "user"
+    },
+    "irfan": {
+        "password": "1234"
+    }
+}
