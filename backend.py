@@ -262,7 +262,7 @@ class PDF_QA_System:
                 model_id=model_id,
                 credentials=creds,
                 project_id=project_id,
-                params={"decoding_method": "greedy", "max_new_tokens": 512}
+                params={"decoding_method": "greedy", "max_new_tokens": 2048} # Increased max_new_tokens for longer summaries
             )
             return self._granite_model
         except Exception as e:
@@ -421,13 +421,21 @@ class PDF_QA_System:
     # ------------------------------
     # Summaries, flashcards, schedule
     # ------------------------------
-    def summarize_contexts(self, k=None) -> str:
+    def summarize_contexts(self, k: Optional[int] = None, level: str = "intermediate") -> Tuple[str, Optional[str]]:
+        """
+        Generates a summary of the loaded PDF contexts, with adjustable complexity levels.
+        Args:
+            k (Optional[int]): Number of chunks to consider for the summary. If None, uses max(self.top_k, 6).
+            level (str): The desired complexity level of the summary. Options: "beginner", "intermediate", "expert".
+        Returns:
+            Tuple[str, Optional[str]]: A tuple containing the generated summary string and the prompt string used (for debugging).
+        """
         if not self.has_index():
-            return "No index: please process PDFs first."
+            return "No index: please process PDFs first.", None
 
         k = int(k or max(self.top_k, 6))
         if len(self.chunks) == 0:
-            return "No documents loaded."
+            return "No documents loaded.", None
 
         # select diverse representatives rather than only longest ones
         reps_idx = self._mmr_select(k)
@@ -436,10 +444,32 @@ class PDF_QA_System:
         representatives = [self.chunks[i] for i in reps_idx]
         text = "\n\n".join(c.text for c in representatives)
 
+        # Define prompt based on the summary level
+        prompt_intro = "Create a summary based on the following text snippets."
+        if level.lower() == "beginner":
+            prompt_style = (
+                "Explain this to a 10-year-old. Keep the summary concise, around 300 words. "
+                "Use very simple language, short sentences, and focus on the absolute main points. "
+                "Provide a clear, bulleted summary."
+            )
+        elif level.lower() == "expert":
+            prompt_style = (
+                "Generate a highly comprehensive and analytical summary, approximately 1000 words. "
+                "Assume a professional or academic audience. Highlight core arguments, complex relationships, "
+                "and critical details. Incorporate technical terms and deep insights where appropriate. "
+                "Focus on high-level insights and implications. Structure as dense bullet points or detailed paragraphs."
+            )
+        else:  # Default to intermediate
+            prompt_style = (
+                "Provide a detailed study summary, approximately 600 words long, that covers ALL distinct topics "
+                "present in the snippets. Use clear and structured language. "
+                "Structure as bullet points grouped by theme. Avoid duplicates. Be concrete."
+            )
+
         prompt = (
-            "Create a concise study summary that covers ALL distinct topics present in the snippets.\n"
-            "Structure as bullet points grouped by theme. Avoid duplicates. Be concrete.\n\n"
-            f"{text}\n\n"
+            f"{prompt_intro}\n"
+            f"{prompt_style}\n\n"
+            f"Context:\n{text}\n\n" # Explicitly label the context
             "Summary:"
         )
 
@@ -454,25 +484,35 @@ class PDF_QA_System:
                     elif isinstance(resp, str):
                         summary = resp.strip()
                 except Exception as e:
-                    print("[PDF_QA_System] granite summary failed:", e, flush=True)
+                    print(f"[PDF_QA_System] granite summary for level '{level}' failed:", e, flush=True)
+                    return f"Error generating summary with Granite: {e}", prompt
+        else:
+            print("[PDF_QA_System] Granite is not enabled or not available for summary generation. Falling back to extractive.", flush=True)
+
 
         # fallback: build grouped bullets by simple keyword coalescing
-        if not summary or len(summary.strip()) < 30:
-            # gather one representative sentence per chunk
+        # This fallback is a heuristic to approximate word count if Granite fails or isn't used.
+        # It's less precise than an LLM but provides some differentiation.
+        if not summary or len(summary.strip().split()) < 50: # Trigger fallback if summary is too short
             sentences = []
+            # Gather all sentences from representatives
             for c in representatives:
-                best = ""
-                for s in re.split(r'(?<=[.!?])\s+', c.text):
-                    if len(s.split()) >= 8 and s[0:1].isalpha():
-                        best = s.strip()
-                        break
-                if best:
-                    sentences.append(best)
+                sentences.extend([s.strip() for s in re.split(r'(?<=[.!?])\s+', c.text) if len(s.strip()) > 10])
+
             if sentences:
-                summary = "- " + "\n- ".join(sentences)
+                avg_words_per_sentence = 20 # Estimate
+                if level.lower() == "beginner":
+                    target_sentences = min(len(sentences), int(300 / avg_words_per_sentence))
+                    summary = "- " + "\n- ".join(sentences[:max(1, target_sentences)]) # Ensure at least 1 sentence
+                elif level.lower() == "intermediate":
+                    target_sentences = min(len(sentences), int(600 / avg_words_per_sentence))
+                    summary = "- " + "\n- ".join(sentences[:max(1, target_sentences)])
+                else: # Expert fallback
+                    target_sentences = min(len(sentences), int(1000 / avg_words_per_sentence))
+                    summary = "- " + "\n- ".join(sentences[:max(1, target_sentences)])
             else:
                 summary = "No summary could be generated."
-        return summary
+        return summary, prompt
 
     def generate_flashcards(self, k=None) -> list:
         if not self.has_index():
@@ -487,14 +527,21 @@ class PDF_QA_System:
 
         flashcards = []
         for c in chunks:
+            # --- UPDATED PROMPT FOR FLASHCARD ACCURACY (MORE STRICT) ---
             prompt = (
-                "From this academic excerpt, create exactly ONE flashcard.\n"
-                "Use this exact format on two lines:\n"
-                "Q: <concise question>\n"
-                "A: <concise answer>\n\n"
-                f"{c.text}\n\n"
+                "Based strictly and only on the academic excerpt provided below, generate exactly ONE flashcard. "
+                "The flashcard MUST contain a specific question and its direct, factual answer as stated or clearly implied within this excerpt. "
+                "The answer should be the information itself, NOT a rephrasing of the question, and NOT an external question. "
+                "Avoid generating questions that are too broad (e.g., 'What is X?'), unless X is directly defined. "
+                "Focus on a single, clear, key piece of factual information. "
+                "Use this EXACT two-line format, without any extra text or conversational filler:\n"
+                "Q: <specific factual question derived from the excerpt>\n"
+                "A: <direct, factual answer from the excerpt>\n\n"
+                f"Excerpt:\n{c.text}\n\n"
                 "Flashcard:"
             )
+            # --- END UPDATED PROMPT ---
+
             qa_pair = None
             if self.use_granite:
                 model = self._get_granite_model()
@@ -506,7 +553,7 @@ class PDF_QA_System:
                         elif isinstance(resp, str):
                             qa_pair = resp.strip()
                     except Exception as e:
-                        print("[PDF_QA_System] granite flashcard failed:", e, flush=True)
+                        print(f"[PDF_QA_System] granite flashcard failed for chunk (page {c.page_num} of {c.doc_name}): {e}", flush=True)
 
             q, a = None, None
             if qa_pair:
@@ -514,21 +561,47 @@ class PDF_QA_System:
                 m_q = re.search(r"(^|\n)\s*Q:\s*(.+)", qa_pair, flags=re.IGNORECASE | re.DOTALL)
                 m_a = re.search(r"(^|\n)\s*A:\s*(.+)", qa_pair, flags=re.IGNORECASE | re.DOTALL)
                 if m_q:
-                    q = m_q.group(2).strip().splitlines()[0]
+                    q = m_q.group(2).strip().splitlines()[0].strip() # ensure no extra newlines or spaces
                 if m_a:
-                    a = m_a.group(2).strip().splitlines()[0]
+                    a = m_a.group(2).strip().splitlines()[0].strip() # ensure no extra newlines or spaces
 
             if not (q and a):
-                # deterministic fallback
+                # deterministic fallback - trying to make this more robust too
                 sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', c.text) if len(s.strip()) > 10]
                 if len(sentences) >= 2:
-                    q = f"What is the main idea of: {sentences[0]}"
-                    a = sentences[1]
-                elif sentences:
-                    q = f"What does this refer to: {sentences[0]}"
-                    a = "It refers to the key concept described in the context."
+                    # Attempt to form a simple Q&A from the first two relevant sentences
+                    q_candidate = sentences[0]
+                    a_candidate = sentences[1]
 
-            if q and a and len(q) > 3 and len(a) > 3:
+                    # Improved heuristic for fallback question generation
+                    if " is " in q_candidate and len(q_candidate.split(' is ', 1)[0].split()) > 1: # check if it defines something
+                        subject = q_candidate.split(' is ', 1)[0].strip()
+                        q = f"What is {subject}?"
+                        a = q_candidate.split(' is ', 1)[1].strip() + " " + a_candidate.strip()
+                        if not a.endswith('.'): a += '.'
+                        # Also check if a_candidate is a continuation of the definition
+                        if len(a.split()) > 50: # prevent excessively long answers from fallback
+                            a = q_candidate.split(' is ', 1)[1].strip()
+                            if not a.endswith('.'): a += '.'
+
+                    elif re.match(r"^[A-Z][a-z0-9\s,;:'\"-]* uses ", q_candidate):
+                         subject = re.match(r"^[A-Z][a-z0-9\s,;:'\"-]*", q_candidate).group(0).strip()
+                         q = f"What does {subject} use?"
+                         a = q_candidate.split(' uses ', 1)[1].strip()
+                         if not a.endswith('.'): a += '.'
+                    else: # General fallback
+                        q = f"What is a key detail from this part of the text?"
+                        a = q_candidate
+                elif sentences:
+                    q = f"What is the main information presented?"
+                    a = sentences[0]
+                else: # Last resort fallback
+                    q = "What is a core idea?"
+                    a = "The provided text discusses academic topics."
+
+
+            # Final validation to ensure basic quality, prevent trivial Q=A, and ensure meaningfulness
+            if q and a and len(q.split()) >= 3 and len(a.split()) >= 3 and q.lower().strip() != a.lower().strip():
                 flashcards.append({'question': q, 'answer': a, 'doc': c.doc_name, 'page': c.page_num})
 
             if len(flashcards) >= k:
