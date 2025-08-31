@@ -170,28 +170,69 @@ if st.session_state.qa.has_index():
 
     # Summary
     with tabs[1]:
-        if st.button("🧾 Generate Summary"):
-            with st.spinner("Summarizing..."):
-                st.write(st.session_state.qa.summarize_contexts())
+        st.subheader("🧾 Generate Document Summary")
+        summary_level = st.selectbox(
+            "Select Summary Level:",
+            ["Intermediate", "Beginner", "Expert"],
+            index=0, # Default to Intermediate
+            help="Choose the complexity level for your summary."
+        )
+
+        if st.button("✨ Get Summary"):
+            with st.spinner(f"Generating {summary_level.lower()}-level summary..."):
+                # Call summarize_contexts which now returns (summary_text, debug_prompt)
+                summary_text, debug_prompt = st.session_state.qa.summarize_contexts(level=summary_level.lower())
+                st.markdown("### Your Summary")
+                st.write(summary_text)
+
+                if debug_prompt: # Display the prompt for debugging
+                    with st.expander("Show Generated Prompt (for debugging)"):
+                        st.code(debug_prompt, language="markdown")
+            # If the fallback was used due to Granite issues, or if Granite isn't enabled
+            if "Error generating summary with Granite" in summary_text:
+                 st.error("Summary generation with IBM Granite failed. Displaying fallback summary (if available) or error message.")
+            elif not st.session_state.qa.use_granite:
+                st.info("IBM Granite is not enabled. Displaying summary from extractive fallback.")
         else:
-            st.info("Click to generate summary.")
+            st.info("Select a level and click 'Get Summary' to generate a summary of your uploaded PDFs.")
 
     # Flashcards
     with tabs[2]:
-        if st.button("Create Flashcards"):
-            fcs = st.session_state.qa.generate_flashcards()
-            for i, fc in enumerate(fcs, 1):
-                st.markdown(f"{i}. Q:** {fc['question']}  \n*A:* {fc['answer']}")
+        st.subheader("🃏 Create Flashcards")
+        flashcard_k = st.number_input("Number of flashcards to generate", 1, 20, 5, 1, key="flashcard_count")
+        if st.button("Create Flashcards", key="gen_flashcards_btn"):
+            with st.spinner(f"Generating {flashcard_k} flashcards..."):
+                fcs = st.session_state.qa.generate_flashcards(k=int(flashcard_k))
+            if fcs:
+                st.markdown("### Your Flashcards")
+                for i, fc in enumerate(fcs, 1):
+                    st.markdown(f"*Q{i}:* {fc['question']}")
+                    st.info(f"*A{i}:* {fc['answer']}")
+                    st.caption(f"Source: {fc['doc']} — Page {fc['page']}")
+                    st.markdown("---")
+            else:
+                st.warning("No flashcards could be generated. Try uploading more diverse content.")
+
 
     # Schedule
     with tabs[3]:
-        days_in = st.number_input("Study days", 1, 60, 7)
-        if st.button("Generate Schedule"):
-            schedule = st.session_state.qa.generate_study_schedule(int(days_in))
-            for s in schedule:
-                st.write(f"{s['day']}")
-                for doc, page in s["pages"]:
-                    st.write(f"- {doc} — Page {page}")
+        st.subheader("📆 Generate Study Schedule")
+        days_in = st.number_input("Number of days for study", 1, 60, 7, key="study_days")
+        if st.button("Generate Schedule", key="gen_schedule_btn"):
+            with st.spinner(f"Creating a {days_in}-day study schedule..."):
+                schedule = st.session_state.qa.generate_study_schedule(int(days_in))
+            if schedule:
+                st.markdown("### Your Study Schedule")
+                for s in schedule:
+                    st.markdown(f"🗓 Day {s['day'].strftime('%Y-%m-%d')}")
+                    if s['pages']:
+                        for doc, page in s["pages"]:
+                            st.write(f"- {doc} — Page {page}")
+                    else:
+                        st.write("- No content scheduled for this day.")
+                st.info("This schedule is a general guide, focusing on page distribution across documents.")
+            else:
+                st.warning("No schedule could be generated. Please upload PDFs first.")
 
     # Quiz
     with tabs[4]:
@@ -202,59 +243,84 @@ if st.session_state.qa.has_index():
         with cols[1]:
             gen_quiz = st.button("📝 Generate Quiz")
         with cols[2]:
-            regen_quiz = st.button("🔄 Get More Quiz Questions")
+            # Removed the "Get More Quiz Questions" button to simplify user flow and avoid confusion
+            pass # Keep this for column alignment if needed, or remove cols[2] if not.
 
-        if gen_quiz or regen_quiz:
+        if gen_quiz: # Simplified logic to only respond to 'Generate Quiz'
             with st.spinner("Generating quiz..."):
                 quiz_qs = st.session_state.qa.generate_quiz_questions(k=int(quiz_k))
             if not quiz_qs:
                 st.warning("No quiz questions could be generated. If your PDFs are scanned, try enabling OCR or upload richer text.")
             else:
                 st.session_state.quiz_data = quiz_qs
-                st.session_state.quiz_show_answers = False
+                # Initialize user selections as None for each question
+                st.session_state.user_quiz_selections = [None] * len(quiz_qs)
+                st.session_state.quiz_show_answers = False # Reset this state for a new quiz
 
         if st.session_state.get("quiz_data"):
             st.divider()
             total = len(st.session_state.quiz_data)
 
+            # Ensure user_quiz_selections list is correctly sized
+            if "user_quiz_selections" not in st.session_state or len(st.session_state.user_quiz_selections) != total:
+                 st.session_state.user_quiz_selections = [None] * total
+
             for idx, q in enumerate(st.session_state.quiz_data, 1):
-                st.markdown(f"Q{idx}. {q['question']}")
+                st.markdown(f"*Q{idx}.* {q['question']}")
                 options = q.get("options") or []
                 if len(options) < 2:
                     st.warning(f"Skipping Q{idx}: not enough options.")
+                    # Ensure selection for this question is None if skipped
+                    st.session_state.user_quiz_selections[idx-1] = None
                     continue
 
-                choice = st.radio("Your answer:", options, key=f"quiz_choice_{idx}")
+                # Use st.radio with index=st.session_state.user_quiz_selections[idx-1]
+                # If st.session_state.user_quiz_selections[idx-1] is None, no option is pre-selected.
+                # Find the current index of the selected option if it exists, otherwise use None
+                current_selection_index = None
+                if st.session_state.user_quiz_selections[idx-1] in options:
+                    current_selection_index = options.index(st.session_state.user_quiz_selections[idx-1])
 
-                cols_q = st.columns([1, 1, 1])
+                choice = st.radio(
+                    "Your answer:",
+                    options,
+                    index=current_selection_index, # Sets initial selection, None for unselected
+                    key=f"quiz_choice_{idx}"
+                )
+                # Update the session state with the user's current choice
+                st.session_state.user_quiz_selections[idx-1] = choice
+
+                # Only show check button, removed "Show Answer"
+                cols_q = st.columns([1, 1]) # Adjusted column count
                 with cols_q[0]:
                     if st.button(f"✅ Check Q{idx}", key=f"check_{idx}"):
-                        if choice == q["answer"]:
+                        if choice is None: # Check if an option was actually selected
+                            st.warning("Please select an option before checking.")
+                        elif choice == q["answer"]:
                             st.success("Correct ✅")
                         else:
                             st.error(f"❌ Wrong. Correct answer: {q['answer']}")
-                with cols_q[1]:
-                    if st.button(f"👀 Show Answer Q{idx}", key=f"show_{idx}"):
-                        st.info(f"Answer: {q['answer']}")
-                with cols_q[2]:
-                    st.caption(f"{q.get('doc','')} — Page {q.get('page','')}")
+                with cols_q[1]: # Keep this for source display if desired
+                    st.caption(f"Source: {q.get('doc','')} — Page {q.get('page','')}")
 
                 st.markdown("---")
 
-            if st.button("🏁 Finish Quiz & Show Score"):
-                score = 0
-                for i, q in enumerate(st.session_state.quiz_data, 1):
-                    sel = st.session_state.get(f"quiz_choice_{i}")
-                    if sel and sel == q["answer"]:
-                        score += 1
+            # Score quiz at the end
+            if st.button("🏁 Finish Quiz & Show Score", key="finish_quiz_btn"):
+                # Pass the collected user selections to the scoring function
+                score_results = st.session_state.qa.score_quiz(st.session_state.user_quiz_selections, st.session_state.quiz_data)
                 st.session_state.quiz_show_answers = True
-                st.success(f"Your Score: {score} / {total}")
+                st.success(f"*Your Score:* {score_results['score']} / {score_results['total']} (Attempted: {score_results['attempted']})")
 
+            # Show all correct answers (after quiz is finished)
             if st.session_state.get("quiz_show_answers"):
                 with st.expander("📘 Show All Correct Answers"):
                     for i, q in enumerate(st.session_state.quiz_data, 1):
-                        st.markdown(f"Q{i}. {q['question']}")
-                        st.write(f"Answer: {q['answer']}")
+                        st.markdown(f"*Q{i}.* {q['question']}")
+                        st.write(f"*Correct Answer:* {q['answer']}")
+                        st.caption(f"Source: {q.get('doc','')} — Page {q.get('page','')}")
+                        st.markdown("---")
+
 
     # ✅ NEW HISTORY TAB
     with tabs[5]:
@@ -263,8 +329,8 @@ if st.session_state.qa.has_index():
             st.info("No questions asked yet.")
         else:
             for i, item in enumerate(reversed(st.session_state.qa_history), 1):
-                st.markdown(f"{i}. Q:** {item['question']}")
-                st.write(f"A: {item['answer']}")
+                st.markdown(f"{i}. Question:** {item['question']}")
+                st.write(f"*Answer:* {item['answer']}")
                 if item.get("citations"):
                     st.caption("Sources: " + ", ".join([f"{c['doc']} p.{c['page']}" for c in item["citations"]]))
                 st.caption(f"Asked at: {item['time']}")
@@ -275,4 +341,4 @@ if st.session_state.qa.has_index():
                 st.success("History cleared.")
 
 else:
-    st.info("Please upload and process at least one PDF.")
+    st.info("Please upload and process at least one PDF to enable Q&A and other study features.")
